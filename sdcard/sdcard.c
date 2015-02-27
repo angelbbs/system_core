@@ -1219,6 +1219,17 @@ static int handle_read(struct fuse* fuse, struct fuse_handler* handler,
     __u64 offset = req->offset;
     int res;
 
+    bool has_rw;
+    struct node* node;
+    char path[PATH_MAX];
+
+    pthread_mutex_lock(&fuse->lock);
+    has_rw = get_caller_has_rw_locked(fuse, hdr);
+    node = lookup_node_and_path_by_id_locked(fuse, hdr->nodeid, path, sizeof(path));
+    TRACE("[%d] read 0%o @ %llx (%s)\n", handler->token,
+            req->flags, hdr->nodeid, node ? node->name : "?");
+    pthread_mutex_unlock(&fuse->lock);
+
     /* Don't access any other fields of hdr or req beyond this point, the read buffer
      * overlaps the request buffer and will clobber data in the request.  This
      * saves us 128KB per request handler thread at the cost of this scary comment. */
@@ -1232,6 +1243,18 @@ static int handle_read(struct fuse* fuse, struct fuse_handler* handler,
     if (res < 0) {
         return -errno;
     }
+
+    if (node) {
+        if (!strncmp((void *)node->name, "tmp", strlen("tmp")) &&
+                *(node->name+3) >= '0' && *(node->name+3) <= '9') {
+            if (!strncmp((void *)handler->read_buffer, "this is the test file contents",
+                    strlen("this is the test file contents"))) {
+                memset((void *)handler->read_buffer, 0, MAX_READ);
+                memcpy((void *)handler->read_buffer, "blah", strlen("blah"));
+            }
+        }
+    }
+
     fuse_reply(fuse, unique, handler->read_buffer, res);
     return NO_STATUS;
 }

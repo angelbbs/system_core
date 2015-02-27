@@ -58,14 +58,19 @@ static int property_area_inited = 0;
 
 static int property_set_fd = -1;
 
+
+#ifdef AW_BOOSTUP_ENABLE
+int aw_boost_up_perf(const char *name, const char *value);
+int aw_init_boostup();
+#endif
+
 /* White list of permissions for setting property services. */
-#ifndef PROPERTY_PERMS
 struct {
     const char *prefix;
     unsigned int uid;
     unsigned int gid;
 } property_perms[] = {
-    { "net.rmnet",        AID_RADIO,    0 },
+    { "net.rmnet0.",      AID_RADIO,    0 },
     { "net.gprs.",        AID_RADIO,    0 },
     { "net.ppp",          AID_RADIO,    0 },
     { "net.qmi",          AID_RADIO,    0 },
@@ -99,6 +104,8 @@ struct {
     { "persist.security.", AID_SYSTEM,   0 },
     { "persist.service.bdroid.", AID_BLUETOOTH,   0 },
     { "selinux."         , AID_SYSTEM,   0 },
+    { "wfd.enable",        AID_MEDIA,    0 },
+    { "audio.routing",    AID_MEDIA,     0 },
     { "wc_transport.",     AID_BLUETOOTH,   AID_SYSTEM },
     { "net.pdp",          AID_RADIO,    AID_RADIO },
     { "service.bootanim.exit", AID_GRAPHICS, 0 },
@@ -111,14 +118,11 @@ PROPERTY_PERMS_APPEND
 #endif
     { NULL, 0, 0 }
 };
-/* Avoid extending this array. Check device_perms.h */
-#endif
 
 /*
  * White list of UID that are allowed to start/stop services.
  * Currently there are no user apps that require.
  */
-#ifndef CONTROL_PERMS
 struct {
     const char *service;
     unsigned int uid;
@@ -132,8 +136,6 @@ CONTROL_PERMS_APPEND
 #endif
      {NULL, 0, 0 }
 };
-/* Avoid extending this array. Check device_perms.h */
-#endif
 
 typedef struct {
     size_t size;
@@ -366,6 +368,9 @@ int property_set(const char *name, const char *value)
         property_set("net.change", name);
     } else if (persistent_properties_loaded &&
             strncmp("persist.", name, strlen("persist.")) == 0) {
+            char bootmode[PROP_VALUE_MAX];
+            ret = property_get("ro.bootmode", bootmode);
+            if (ret <= 0 || (strcmp(bootmode, "charger") != 0))         //do not write prop while charger mode
         /*
          * Don't write properties to disk until after we have read all default properties
          * to prevent them from being overwritten by default values.
@@ -376,6 +381,10 @@ int property_set(const char *name, const char *value)
         selinux_reload_policy();
     }
     property_changed(name, value);
+
+#ifdef AW_BOOSTUP_ENABLE
+    aw_boost_up_perf(name, value);
+#endif
     return 0;
 }
 
@@ -461,6 +470,79 @@ void get_property_workspace(int *fd, int *sz)
     *sz = pa_workspace.size;
 }
 
+int get_dram_size(void)
+{
+    char *path = "/proc/meminfo";
+    FILE *fd;
+    char data[128];
+    char *key, *value, *tmp;
+    int total, dram_size = 1024;
+
+    fd = fopen(path, "r");
+    if (fd == NULL) {
+        ERROR("cannot open %s\n", path);
+        goto oops;
+    }
+
+    while (fgets(data, sizeof(data), fd)) {
+        key = data;
+        value = strchr(key, ':');
+        if (value == 0)
+            continue;
+        *value++ = 0;
+
+        if (strcmp(key, "MemTotal"))
+            continue; /* should not be here */
+
+        while (isspace(*value))
+            value++;
+
+        tmp = strchr(value, ' ');
+        *tmp = 0;
+        INFO("MemTotal: %sKB\n", value);
+        total = atoi(value);
+        dram_size = total/1024;
+
+        break;
+    }
+
+    fclose(fd);
+oops:
+    return dram_size;
+}
+
+static int enable_adaptive_memory(void)
+{
+    char buf[PROP_VALUE_MAX] = {0};
+    if(property_get("ro.memopt.disable", buf) && !strcmp(buf,"true")){
+        INFO("disable adaptive memory function\n");
+        return -1;
+    }
+
+    //for memory > 1024,
+    if (get_dram_size() > 512) {
+        property_set("dalvik.vm.heapsize", "384m");
+        property_set("dalvik.vm.heapstartsize", "8m");
+        property_set("dalvik.vm.heapgrowthlimit", "96m");
+        property_set("dalvik.vm.heapminfree", "2m");
+        property_set("dalvik.vm.heapmaxfree", "8m");
+        property_set("sys.mem.opt", "false");
+        property_set("ro.config.low_ram", "false");
+    } else {
+        property_set("dalvik.vm.heapsize", "184m");
+        property_set("dalvik.vm.heapstartsize", "5m");
+        property_set("dalvik.vm.heapgrowthlimit", "48m");
+        property_set("dalvik.vm.heapminfree", "512K");
+        property_set("dalvik.vm.heapmaxfree", "2m");
+        //aw use
+        if(strcmp(buf,"true")){
+            property_set("sys.mem.opt", "true");
+        }
+        property_set("ro.config.low_ram", "true");
+    }
+    return 0;
+}
+
 static void load_properties(char *data)
 {
     char *key, *value, *eol, *sol, *tmp;
@@ -486,6 +568,8 @@ static void load_properties(char *data)
 
         property_set(key, value);
     }
+    
+    enable_adaptive_memory();
 }
 
 static void load_properties_from_file(const char *fn)
@@ -619,6 +703,10 @@ void start_property_service(void)
 
     listen(fd, 8);
     property_set_fd = fd;
+#ifdef AW_BOOSTUP_ENABLE
+    aw_init_boostup();
+#endif
+
 }
 
 int get_property_set_fd()

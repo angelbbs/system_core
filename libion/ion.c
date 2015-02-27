@@ -29,6 +29,13 @@
 
 #include <linux/ion.h>
 #include <ion/ion.h>
+#define ION_IOC_SUNXI_PHYS_ADDR             7
+#define ION_IOC_SUNXI_FLUSH_ALL             6
+typedef struct {
+        void *handle;
+        unsigned int phys_addr;
+        unsigned int size;
+}sunxi_phys_data;
 
 int ion_open()
 {
@@ -47,12 +54,15 @@ static int ion_ioctl(int fd, int req, void *arg)
 {
         int ret = ioctl(fd, req, arg);
         if (ret < 0) {
-                ALOGE("ioctl %x failed with code %d: %s\n", req,
-                       ret, strerror(errno));
+		struct ion_allocation_data *p = arg;
+		if(p->heap_mask != ION_HEAP_SYSTEM_CONTIG_MASK)
+			ALOGE("ioctl %x failed with code %d: %s\n", req,
+			       ret, strerror(errno));
                 return -errno;
         }
         return ret;
 }
+
 
 int ion_alloc(int fd, size_t len, size_t align, unsigned int heap_mask,
 	      unsigned int flags, struct ion_handle **handle)
@@ -61,9 +71,7 @@ int ion_alloc(int fd, size_t len, size_t align, unsigned int heap_mask,
         struct ion_allocation_data data = {
                 .len = len,
                 .align = align,
-#ifndef OLD_ION_API
 		.heap_mask = heap_mask,
-#endif
                 .flags = flags,
         };
 
@@ -151,12 +159,30 @@ int ion_import(int fd, int share_fd, struct ion_handle **handle)
 
 int ion_sync_fd(int fd, int handle_fd)
 {
-#ifdef OLD_ION_API
-    return 0;
-#else
     struct ion_fd_data data = {
         .fd = handle_fd,
     };
+    {
+	    struct ion_custom_data custom_data;
+	    sunxi_phys_data phys_data;
+	    custom_data.cmd = ION_IOC_SUNXI_FLUSH_ALL;
+			phys_data.handle = handle_fd;
+			custom_data.arg = (unsigned long)&phys_data;
+			ioctl(fd, ION_IOC_CUSTOM, &custom_data);
+		}
     return ion_ioctl(fd, ION_IOC_SYNC, &data);
-#endif
+}
+
+int ion_getphyadr(int fd,void *handle_fd)
+{
+		int ret = 0;
+		struct ion_custom_data custom_data;
+		sunxi_phys_data phys_data;
+    custom_data.cmd = ION_IOC_SUNXI_PHYS_ADDR;
+		phys_data.handle = handle_fd;
+		custom_data.arg = (unsigned long)&phys_data;
+		ret = ioctl(fd, ION_IOC_CUSTOM, &custom_data);
+		if(ret < 0)
+			return 0;
+    return phys_data.phys_addr;
 }

@@ -754,7 +754,8 @@ static int console_init_action(int nargs, char **args)
     close(fd);
 
 #ifdef INITLOGO
-    if( load_565rle_image(INIT_IMAGE_FILE) ) {
+    // if( load_565rle_image(INIT_IMAGE_FILE) ) {
+    if( strcmp(bootmode, "charger") && load_argb8888_image(INIT_IMAGE_FILE) ) {
         fd = open("/dev/tty0", O_WRONLY);
         if (fd >= 0) {
             const char *msg;
@@ -828,9 +829,49 @@ static void import_kernel_nv(char *name, int for_emulator)
     }
 }
 
+#define CPUINFO "/proc/cpuinfo"
+#define KEYWORD "Serial"
+
+static int get_cpu_id(char* buf, size_t size)
+{
+    ssize_t i=0,j=0;
+    ssize_t index=0,len=0;
+    int fd = open(CPUINFO, O_RDONLY, 0);
+    if (fd == -1) {
+        return -1;
+    }
+    ssize_t count = read(fd, buf, size);
+	close(fd);
+	if(count>0){
+		for(i=0;i<count;i++){
+			if(buf[i] == '\n'){
+				buf[i] = '\0';
+			}
+		}
+	}else{
+		buf[0] = '\0';
+	}
+	while(!strstr((buf + index),KEYWORD)&&(index<count)){
+		if((len = strlen(buf + index))!=0){
+			index += len;
+		}else{
+			index += 1;
+		}
+	}
+	for(i=0;i<count - index;i++){
+		if(buf[index + i]==':')
+			break;
+	}
+	for(j=0;j<strlen(&buf[index+i]);j++)
+		buf[j] = buf[index + i + j + 2];
+	buf[j+1] = '\0';
+    return strlen(buf);
+}
+
 static void export_kernel_boot_props(void)
 {
     char tmp[PROP_VALUE_MAX];
+    char cpuinfobuf[1024] = {0};
     int ret;
     unsigned i;
     struct {
@@ -844,7 +885,10 @@ static void export_kernel_boot_props(void)
         { "ro.boot.bootloader", "ro.bootloader", "unknown", },
     };
 
-    for (i = 0; i < ARRAY_SIZE(prop_map); i++) {
+    get_cpu_id(cpuinfobuf, sizeof(cpuinfobuf));
+    i = 0;
+    property_set(prop_map[i].dest_prop, cpuinfobuf);
+    for (i = 1; i < ARRAY_SIZE(prop_map); i++) {
         ret = property_get(prop_map[i].src_prop, tmp);
         if (ret > 0)
             property_set(prop_map[i].dest_prop, tmp);
@@ -962,6 +1006,7 @@ static int bootchart_init_action(int nargs, char **args)
 #endif
 
 static const struct selinux_opt seopts_prop[] = {
+        { SELABEL_OPT_PATH, "/data/security/property_contexts" },
         { SELABEL_OPT_PATH, "/property_contexts" },
         { 0, NULL }
 };
@@ -1109,6 +1154,15 @@ int main(int argc, char **argv)
     int keychord_fd_init = 0;
     bool is_charger = false;
 
+    char* args_swapon[2];
+    args_swapon[0] = "swapon_all";;
+    args_swapon[1] = "/fstab.sun4i";;
+        
+    char* args_write[3];
+    args_write[0] = "write";
+    args_write[1] = "/proc/sys/vm/page-cluster";
+    args_write[2] = "0";
+
     if (!strcmp(basename(argv[0]), "ueventd"))
         return ueventd_main(argc, argv);
 
@@ -1122,11 +1176,6 @@ int main(int argc, char **argv)
          * together in the initramdisk on / and then we'll
          * let the rc file figure out the rest.
          */
-    /* Don't repeat the setup of these filesystems,
-     * it creates double mount points with an unknown effect
-     * on the system.  This init file is for 2nd-init anyway.
-     */
-#ifndef NO_DEVFS_SETUP
     mkdir("/dev", 0755);
     mkdir("/proc", 0755);
     mkdir("/sys", 0755);
@@ -1149,7 +1198,6 @@ int main(int argc, char **argv)
          */
     open_devnull_stdio();
     klog_init();
-#endif
     property_init();
 
     get_hardware_name(hardware, &revision);
@@ -1178,7 +1226,8 @@ int main(int argc, char **argv)
     INFO("property init\n");
     if (!is_charger)
         property_load_boot_defaults();
-
+	//get_kernel_cmdline_partitions();
+    //get_kernel_cmdline_signature();
     INFO("reading config file\n");
 
     if (!charging_mode_booting())
@@ -1236,6 +1285,7 @@ int main(int argc, char **argv)
         is_charger = 1;
 
     if (is_charger) {
+        queue_builtin_action(console_init_action, "console_init");
         action_for_each_trigger("charger", action_add_queue_tail);
     } else {
         action_for_each_trigger("early-boot", action_add_queue_tail);
